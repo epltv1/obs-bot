@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import os
+import signal here
 import signal
 import json
 import time
@@ -116,7 +117,7 @@ class Stream:
         )
         STREAMS.pop(self.sid, None)
         db = load_db()
-        db.pop(sid, None)
+        db.pop(self.sid, None)
         save_db(db)
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
@@ -197,7 +198,7 @@ async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
     await update.message.reply_text(
-        "Send **FULL RTMP URL** (include key)\n"
+        "Send **FULL RTMP URL**\n"
         "Examples:\n"
         "`rtmp://vsu.okcdn.ru/input/9985024204507_9267443665627_me6vymuxxy`\n"
         "`rtmps://live-api-s.facebook.com:443/rtmp/FB-KEY`",
@@ -222,7 +223,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Title: `{context.user_data['title']}`\n"
         f"M3U8: `{context.user_data['url']}`\n"
         f"RTMP: `{context.user_data['rtmp_url']}`\n"
-        f"*Full Quality Mode*",
+        f"*Full Quality*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -302,7 +303,7 @@ async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = load_db()
         db.pop(sid, None)
         save_db(db)
-    await q VPS.edit_message_text("Stream stopped.")
+    await q.edit_message_text("Stream stopped.")
 
 # ----------------------------------------------------------------------
 # MAIN
