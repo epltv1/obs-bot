@@ -27,7 +27,7 @@ DATA_DIR.mkdir(exist_ok=True)
 STREAM_DB = DATA_DIR / "streams.json"
 LOG_FILE  = DATA_DIR / "bot.log"
 
-(INPUT_URL, INPUT_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
+(INPUT_URL, INPUT_FULL_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
 
 # ----------------------------------------------------------------------
 # HELPERS
@@ -49,7 +49,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS — M3U8 → ANY RTMP/RTMPS
+# STREAM CLASS — M3U8 → FULL RTMP/RTMPS URL
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -89,20 +89,15 @@ class Stream:
             "-f", "flv"
         ]
 
-        # RTMPS (SSL) → Add tls flags
+        # RTMPS (SSL) — Use tcurl
         if rtmp.startswith("rtmps://"):
             base.extend([
-                "-rtmp_live", "live",
-                "-rtmp_app", rtmp.split("/", 3)[3].split("?")[0] if "/" in rtmp.split("://", 1)[1] else "",
-                "-rtmp_playpath", "",
-                "-rtmp_swfurl", "",
                 "-rtmp_tcurl", rtmp,
                 rtmp
             ])
-            return base
+        else:
+            base.append(rtmp)
 
-        # Standard RTMP
-        base.append(rtmp)
         return base
 
     async def _monitor(self, app):
@@ -118,7 +113,7 @@ class Stream:
         await app.bot.send_message(
             OWNER_ID,
             f"Stream *{title}* stopped after {uptime}\n"
-            f"RTMP: {self.data['rtmp_url']}",
+            f"RTMP: `{self.data['rtmp_url']}`",
             parse_mode="Markdown"
         )
         STREAMS.pop(self.sid, None)
@@ -129,12 +124,11 @@ class Stream:
             self.thumb_path.unlink(missing_ok=True)
 
     async def stop(self):
-        if self.proc and self.proc.returncode is not None:
-            return
-        self.proc.send_signal(signal.SIGTERM)
-        await asyncio.sleep(1)
-        if self.proc.returncode is None:
-            self.proc.kill()
+        if self.proc and self.proc.returncode is None:
+            self.proc.send_signal(signal.SIGTERM)
+            await asyncio.sleep(1)
+            if self.proc.returncode is None:
+                self.proc.kill()
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
 
@@ -165,14 +159,18 @@ async def load_running_streams(app):
 # COMMANDS
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("*M3U8 → RTMP/RTMPS Bot*\nUse /help", parse_mode="Markdown")
+    await update.message.reply_text(
+        "*M3U8 → RTMP/RTMPS Bot*\n"
+        "Send /stream to start",
+        parse_mode="Markdown"
+    )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Commands*\n"
-        "/stream – start M3U8 → RTMP/RTMPS\n"
+        "/stream – M3U8 → RTMP/RTMPS\n"
         "/streamlist – view & stop\n"
-        "/ping – stats",
+        "/ping – VPS stats",
         parse_mode="Markdown"
     )
 
@@ -181,12 +179,15 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disk = psutil.disk_usage('/')
     cpu = psutil.cpu_percent(1)
     await update.message.reply_text(
-        f"*VPS*\nCPU: {cpu}%\nRAM: {ram.percent}%\nDisk: {disk.percent}%",
+        f"*VPS Status*\n"
+        f"CPU: {cpu}%\n"
+        f"RAM: {ram.percent}%\n"
+        f"Disk: {disk.percent}%",
         parse_mode="Markdown"
     )
 
 # ----------------------------------------------------------------------
-# /stream
+# /stream — FULL RTMP URL
 # ----------------------------------------------------------------------
 async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -197,14 +198,20 @@ async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
-    await update.message.reply_text("Send RTMP URL (rtmp:// or rtmps://):")
-    return INPUT_RTMP
+    await update.message.reply_text(
+        "Send **FULL RTMP URL** (include key)\n"
+        "Examples:\n"
+        "`rtmp://vsu.okcdn.ru/input/9985024204507_9267443665627_me6vymuxxy`\n"
+        "`rtmps://live-api-s.facebook.com:443/rtmp/FB-KEY`",
+        parse_mode="Markdown"
+    )
+    return INPUT_FULL_RTMP
 
-async def input_rtmp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def input_full_rtmp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rtmp = update.message.text.strip()
     if not rtmp.startswith(("rtmp://", "rtmps://")):
-        await update.message.reply_text("Invalid! Must start with `rtmp://` or `rtmps://`")
-        return INPUT_RTMP
+        await update.message.reply_text("Must start with `rtmp://` or `rtmps://`")
+        return INPUT_FULL_RTMP
     context.user_data["rtmp_url"] = rtmp
     await update.message.reply_text("Send stream title:")
     return INPUT_TITLE
@@ -213,8 +220,9 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["title"] = update.message.text.strip()
     kb = [[InlineKeyboardButton("Start Stream", callback_data="start_stream")]]
     await update.message.reply_text(
-        f"Start: *{context.user_data['title']}*\n"
-        f"M3U8: {context.user_data['url']}\n"
+        f"*Confirm Stream*\n"
+        f"Title: `{context.user_data['title']}`\n"
+        f"M3U8: `{context.user_data['url']}`\n"
         f"RTMP: `{context.user_data['rtmp_url']}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
@@ -224,7 +232,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("Starting...")
+    await q.edit_message_text("Starting stream...")
 
     sid = str(uuid.uuid4())
     data = context.user_data.copy()
@@ -236,7 +244,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db[sid] = data
     save_db(db)
 
-    await q.edit_message_text("Stream started! Supports RTMP & RTMPS.")
+    await q.edit_message_text("Stream started! Use /streamlist to manage.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,7 +258,7 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     if not STREAMS:
-        await update.message.reply_text("No streams.")
+        await update.message.reply_text("No active streams.")
         return
 
     for sid, stream in list(STREAMS.items()):
@@ -265,18 +273,21 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stream.take_thumbnail()
         title = stream.data['title']
         up = stream.uptime_str()
+        rtmp = stream.data['rtmp_url']
         kb = [[InlineKeyboardButton("Stop", callback_data=f"stop_{sid}")]]
+
+        caption = f"*M3U8 Stream*\nTitle: `{title}`\nUptime: `{up}`\nRTMP: `{rtmp}`"
 
         if stream.thumb_path.exists():
             await update.message.reply_photo(
                 photo=open(stream.thumb_path, "rb"),
-                caption=f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}\nRTMP: `{stream.data['rtmp_url']}`",
+                caption=caption,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
         else:
             await update.message.reply_text(
-                f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}\nRTMP: `{stream.data['rtmp_url']}`",
+                caption,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
@@ -292,7 +303,7 @@ async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = load_db()
         db.pop(sid, None)
         save_db(db)
-    await q.edit_message_text("Stopped.")
+    await q.edit_message_text("Stream stopped.")
 
 # ----------------------------------------------------------------------
 # MAIN
@@ -308,7 +319,7 @@ def main():
         entry_points=[CommandHandler("stream", stream_start)],
         states={
             INPUT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_url)],
-            INPUT_RTMP: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_rtmp)],
+            INPUT_FULL_RTMP: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_full_rtmp)],
             INPUT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_title)],
             CONFIRM_START: [CallbackQueryHandler(confirm_start, "^start_stream$")],
         },
