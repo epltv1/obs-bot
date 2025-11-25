@@ -49,7 +49,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS — M3U8 → FULL RTMP/RTMPS URL
+# STREAM CLASS — FULL QUALITY
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -81,15 +81,13 @@ class Stream:
             "-re", "-i", src,
             "-c:v", "libx264",
             "-preset", "veryfast",
-            "-b:v", "1200k",
-            "-maxrate", "1400k",
-            "-bufsize", "2000k",
+            "-tune", "zerolatency",
+            "-g", "30",
             "-c:a", "aac",
             "-b:a", "128k",
             "-f", "flv"
         ]
 
-        # RTMPS (SSL) — Use tcurl
         if rtmp.startswith("rtmps://"):
             base.extend([
                 "-rtmp_tcurl", rtmp,
@@ -118,7 +116,7 @@ class Stream:
         )
         STREAMS.pop(self.sid, None)
         db = load_db()
-        db.pop(self.sid, None)
+        db.pop(sid, None)
         save_db(db)
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
@@ -187,7 +185,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------------------------------------
-# /stream — FULL RTMP URL
+# /stream
 # ----------------------------------------------------------------------
 async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -223,7 +221,8 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*Confirm Stream*\n"
         f"Title: `{context.user_data['title']}`\n"
         f"M3U8: `{context.user_data['url']}`\n"
-        f"RTMP: `{context.user_data['rtmp_url']}`",
+        f"RTMP: `{context.user_data['rtmp_url']}`\n"
+        f"*Full Quality Mode*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -232,7 +231,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("Starting stream...")
+    await q.edit_message_text("Starting stream in **FULL QUALITY**...")
 
     sid = str(uuid.uuid4())
     data = context.user_data.copy()
@@ -244,7 +243,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db[sid] = data
     save_db(db)
 
-    await q.edit_message_text("Stream started! Use /streamlist to manage.")
+    await q.edit_message_text("Stream started! **Full original quality**.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +275,7 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rtmp = stream.data['rtmp_url']
         kb = [[InlineKeyboardButton("Stop", callback_data=f"stop_{sid}")]]
 
-        caption = f"*M3U8 Stream*\nTitle: `{title}`\nUptime: `{up}`\nRTMP: `{rtmp}`"
+        caption = f"*M3U8 Stream*\nTitle: `{title}`\nUptime: `{up}`\nRTMP: `{rtmp}`\n*Full Quality*"
 
         if stream.thumb_path.exists():
             await update.message.reply_photo(
@@ -303,7 +302,7 @@ async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = load_db()
         db.pop(sid, None)
         save_db(db)
-    await q.edit_message_text("Stream stopped.")
+    await q VPS.edit_message_text("Stream stopped.")
 
 # ----------------------------------------------------------------------
 # MAIN
