@@ -6,8 +6,6 @@ import json
 import time
 import psutil
 import uuid
-import random
-import string
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -30,18 +28,27 @@ LOG_FILE  = DATA_DIR / "bot.log"
 (INPUT_URL, INPUT_FULL_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
 
 # ----------------------------------------------------------------------
-# HELPERS
+# LOGGING
 # ----------------------------------------------------------------------
 def log(msg: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}")
+    full_msg = f"[{ts}] {msg}"
+    print(full_msg)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {msg}\n")
+        f.write(full_msg + "\n")
 
+log("Bot script loaded.")
+
+# ----------------------------------------------------------------------
+# DB
+# ----------------------------------------------------------------------
 def load_db():
     if STREAM_DB.exists():
-        with open(STREAM_DB, "r") as f:
-            return json.load(f)
+        try:
+            with open(STREAM_DB, "r") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 def save_db(db):
@@ -49,7 +56,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS — FULL QUALITY + NO HANG
+# STREAM CLASS
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -62,22 +69,23 @@ class Stream:
     async def start(self, app):
         cmd = self._build_ffmpeg()
         log(f"STARTING: {' '.join(cmd)}")
-        self.proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        asyncio.create_task(self._monitor(app))
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            asyncio.create_task(self._monitor(app))
+        except Exception as e:
+            log(f"FFmpeg failed to start: {e}")
+            await app.bot.send_message(OWNER_ID, f"FFmpeg error: {e}")
 
     def _build_ffmpeg(self):
         src = self.data["url"]
         rtmp = self.data["rtmp_url"]
-
         base = [
             "ffmpeg", "-y",
-            "-analyzeduration", "1000000",
-            "-probesize", "1000000",
             "-fflags", "+genpts",
             "-re", "-i", src,
             "-c:v", "libx264",
@@ -88,12 +96,10 @@ class Stream:
             "-b:a", "128k",
             "-f", "flv"
         ]
-
         if rtmp.startswith("rtmps://"):
             base.extend(["-rtmp_tcurl", rtmp, rtmp])
         else:
             base.append(rtmp)
-
         return base
 
     async def _monitor(self, app):
@@ -108,8 +114,7 @@ class Stream:
         title = self.data.get("title", "Unknown")
         await app.bot.send_message(
             OWNER_ID,
-            f"Stream *{title}* stopped after {uptime}\n"
-            f"RTMP: `{self.data['rtmp_url']}`",
+            f"Stream *{title}* stopped after {uptime}",
             parse_mode="Markdown"
         )
         STREAMS.pop(self.sid, None)
@@ -124,7 +129,7 @@ class Stream:
             self.proc.terminate()
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except:
                 self.proc.kill()
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
@@ -156,32 +161,22 @@ async def load_running_streams(app):
 # COMMANDS
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log(f"/start from {update.effective_user.id}")
     await update.message.reply_text(
-        "*M3U8 → RTMP/RTMPS Bot*\n"
-        "Send /stream to start streaming",
+        "*M3U8 → RTMP Bot*\nSend /stream to begin",
         parse_mode="Markdown"
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*Commands*\n"
-        "/stream – Start M3U8 → RTMP\n"
-        "/streamlist – View & stop\n"
-        "/ping – VPS stats",
+        "*Commands*\n/stream – Start\n/streamlist – Manage\n/ping – Stats",
         parse_mode="Markdown"
     )
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ram = psutil.virtual_memory()
-    disk = psutil.disk_usage('/')
     cpu = psutil.cpu_percent(1)
-    await update.message.reply_text(
-        f"*VPS Status*\n"
-        f"CPU: {cpu}%\n"
-        f"RAM: {ram.percent}%\n"
-        f"Disk: {disk.percent}%",
-        parse_mode="Markdown"
-    )
+    ram = psutil.virtual_memory().percent
+    await update.message.reply_text(f"*VPS*\nCPU: {cpu}%\nRAM: {ram}%", parse_mode="Markdown")
 
 # ----------------------------------------------------------------------
 # /stream
@@ -195,33 +190,23 @@ async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Send **FULL RTMP URL** (with key)\n"
-        "Examples:\n"
-        "`rtmp://vsu.okcdn.ru/input/9985024204507_9267443665627_me6vymuxxy`\n"
-        "`rtmps://live-api-s.facebook.com:443/rtmp/FB-KEY`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("Send **FULL RTMP URL** (with key):")
     return INPUT_FULL_RTMP
 
 async def input_full_rtmp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rtmp = update.message.text.strip()
     if not rtmp.startswith(("rtmp://", "rtmps://")):
-        await update.message.reply_text("Must start with `rtmp://` or `rtmps://`")
+        await update.message.reply_text("Must start with rtmp:// or rtmps://")
         return INPUT_FULL_RTMP
     context.user_data["rtmp_url"] = rtmp
-    await update.message.reply_text("Send stream title:")
+    await update.message.reply_text("Send title:")
     return INPUT_TITLE
 
 async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["title"] = update.message.text.strip()
-    kb = [[InlineKeyboardButton("Start Stream", callback_data="start_stream")]]
+    kb = [[InlineKeyboardButton("Start", callback_data="start_stream")]]
     await update.message.reply_text(
-        f"*Confirm Stream*\n"
-        f"Title: `{context.user_data['title']}`\n"
-        f"M3U8: `{context.user_data['url']}`\n"
-        f"RTMP: `{context.user_data['rtmp_url']}`\n"
-        f"*Full Quality*",
+        f"*Confirm*\nTitle: `{context.user_data['title']}`\nM3U8: `{context.user_data['url']}`\nRTMP: `{context.user_data['rtmp_url']}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -230,7 +215,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("Starting stream...")
+    await q.edit_message_text("Starting...")
 
     sid = str(uuid.uuid4())
     data = context.user_data.copy()
@@ -242,7 +227,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db[sid] = data
     save_db(db)
 
-    await q.edit_message_text("Stream started! Full quality.")
+    await q.edit_message_text("Stream started!")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,7 +241,7 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     if not STREAMS:
-        await update.message.reply_text("No active streams.")
+        await update.message.reply_text("No streams.")
         return
 
     for sid, stream in list(STREAMS.items()):
@@ -271,24 +256,13 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stream.take_thumbnail()
         title = stream.data['title']
         up = stream.uptime_str()
-        rtmp = stream.data['rtmp_url']
         kb = [[InlineKeyboardButton("Stop", callback_data=f"stop_{sid}")]]
-
-        caption = f"*M3U8 Stream*\nTitle: `{title}`\nUptime: `{up}`\nRTMP: `{rtmp}`\n*Full Quality*"
+        caption = f"*Stream*\nTitle: `{title}`\nUptime: `{up}`"
 
         if stream.thumb_path.exists():
-            await update.message.reply_photo(
-                photo=open(stream.thumb_path, "rb"),
-                caption=caption,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
+            await update.message.reply_photo(open(stream.thumb_path, "rb"), caption=caption, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         else:
-            await update.message.reply_text(
-                caption,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
+            await update.message.reply_text(caption, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -301,16 +275,17 @@ async def stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db = load_db()
         db.pop(sid, None)
         save_db(db)
-    await q.edit_message_text("Stream stopped.")
+    await q.edit_message_text("Stopped.")
 
 # ----------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------
 async def post_init(app: Application):
-    app.bot_data["start_ts"] = time.time()
+    log("Bot connected to Telegram.")
     await load_running_streams(app)
 
 def main():
+    log("Starting bot application...")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     conv = ConversationHandler(
@@ -332,7 +307,7 @@ def main():
     app.add_handler(CommandHandler("streamlist", streamlist))
     app.add_handler(CallbackQueryHandler(stop_callback, "^stop_"))
 
-    log("Bot started. Polling...")
+    log("Polling started.")
     app.run_polling()
 
 if __name__ == "__main__":
