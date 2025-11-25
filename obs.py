@@ -27,8 +27,7 @@ DATA_DIR.mkdir(exist_ok=True)
 STREAM_DB = DATA_DIR / "streams.json"
 LOG_FILE  = DATA_DIR / "bot.log"
 
-(CHOOSING_TYPE, INPUT_URL, INPUT_RTMP_KEY, INPUT_STREAM_KEY,
- INPUT_TITLE, INPUT_MPD_KEYS, CONFIRM_START) = range(7)
+(INPUT_URL, INPUT_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
 
 # ----------------------------------------------------------------------
 # HELPERS
@@ -50,7 +49,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS
+# STREAM CLASS — M3U8 → ANY RTMP
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -72,9 +71,9 @@ class Stream:
 
     def _build_ffmpeg(self):
         src = self.data["url"]
-        rtmp = f"rtmp://vsu.okcdn.ru/input/{self.data['rtmp_key']}_{self.data['stream_key']}_{self._rand()}"
+        rtmp = self.data["rtmp_url"]  # ANY RTMP
 
-        base = [
+        return [
             "ffmpeg", "-y",
             "-analyzeduration", "1000000",
             "-probesize", "1000000",
@@ -91,18 +90,6 @@ class Stream:
             rtmp
         ]
 
-        if self.data["type"] == "mpd" and "mpd_keys" in self.data:
-            k = self.data["mpd_keys"].split(":")
-            if len(k) == 2:
-                base.insert(base.index("-i") + 1, k[1])
-                base.insert(base.index("-i") + 1, "-decryption_key")
-                base.insert(base.index("-i") + 1, k[0])
-
-        return base
-
-    def _rand(self):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-
     async def _monitor(self, app):
         while True:
             await asyncio.sleep(2)
@@ -116,7 +103,7 @@ class Stream:
         await app.bot.send_message(
             OWNER_ID,
             f"Stream *{title}* stopped after {uptime}\n"
-            f"Type: {self.data['type'].upper()}",
+            f"RTMP: {self.data['rtmp_url']}",
             parse_mode="Markdown"
         )
         STREAMS.pop(self.sid, None)
@@ -162,12 +149,12 @@ async def load_running_streams(app):
 # COMMANDS
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("*OBS Bot*\nUse /help", parse_mode="Markdown")
+    await update.message.reply_text("*M3U8 → RTMP Bot*\nUse /help", parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Commands*\n"
-        "/stream – start\n"
+        "/stream – start M3U8 → RTMP\n"
         "/streamlist – view & stop\n"
         "/ping – stats",
         parse_mode="Markdown"
@@ -183,57 +170,36 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------------------------------------
-# /stream
+# /stream — M3U8 + ANY RTMP
 # ----------------------------------------------------------------------
 async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("Owner only.")
         return ConversationHandler.END
-    kb = [
-        [InlineKeyboardButton("M3U8", callback_data="type_m3u8")],
-        [InlineKeyboardButton("MP4", callback_data="type_mp4")],
-        [InlineKeyboardButton("YouTube", callback_data="type_yt")],
-        [InlineKeyboardButton("MPD", callback_data="type_mpd")],
-    ]
-    await update.message.reply_text("Choose type:", reply_markup=InlineKeyboardMarkup(kb))
-    return CHOOSING_TYPE
-
-async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    t = q.data.split("_")[1]
-    context.user_data["type"] = t
-    await q.edit_message_text("Send URL:")
+    await update.message.reply_text("Send M3U8 URL:")
     return INPUT_URL
 
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
-    if context.user_data["type"] == "mpd":
-        await update.message.reply_text("Send DRM keys (kid:key):")
-        return INPUT_MPD_KEYS
-    await update.message.reply_text("Send RTMP key:")
-    return INPUT_RTMP_KEY
+    await update.message.reply_text("Send RTMP URL (e.g. rtmp://...):")
+    return INPUT_RTMP
 
-async def input_mpd_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["mpd_keys"] = update.message.text.strip()
-    await update.message.reply_text("Send RTMP key:")
-    return INPUT_RTMP_KEY
-
-async def input_rtmp_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["rtmp_key"] = update.message.text.strip()
-    await update.message.reply_text("Send stream key:")
-    return INPUT_STREAM_KEY
-
-async def input_stream_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["stream_key"] = update.message.text.strip()
-    await update.message.reply_text("Send title:")
+async def input_rtmp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rtmp = update.message.text.strip()
+    if not rtmp.startswith("rtmp://"):
+        await update.message.reply_text("Invalid RTMP URL. Must start with rtmp://")
+        return INPUT_RTMP
+    context.user_data["rtmp_url"] = rtmp
+    await update.message.reply_text("Send stream title:")
     return INPUT_TITLE
 
 async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["title"] = update.message.text.strip()
     kb = [[InlineKeyboardButton("Start Stream", callback_data="start_stream")]]
     await update.message.reply_text(
-        f"Start: *{context.user_data['title']}*",
+        f"Start: *{context.user_data['title']}*\n"
+        f"M3U8: {context.user_data['url']}\n"
+        f"RTMP: {context.user_data['rtmp_url']}",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -281,7 +247,6 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         await stream.take_thumbnail()
-        typ = stream.data['type'].upper()
         title = stream.data['title']
         up = stream.uptime_str()
         kb = [[InlineKeyboardButton("Stop", callback_data=f"stop_{sid}")]]
@@ -289,13 +254,13 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if stream.thumb_path.exists():
             await update.message.reply_photo(
                 photo=open(stream.thumb_path, "rb"),
-                caption=f"*{typ}*\nTitle: {title}\nUptime: {up}",
+                caption=f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
         else:
             await update.message.reply_text(
-                f"*{typ}*\nTitle: {title}\nUptime: {up}",
+                f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
@@ -326,11 +291,8 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("stream", stream_start)],
         states={
-            CHOOSING_TYPE: [CallbackQueryHandler(choose_type, "^type_")],
             INPUT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_url)],
-            INPUT_MPD_KEYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_mpd_keys)],
-            INPUT_RTMP_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_rtmp_key)],
-            INPUT_STREAM_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_stream_key)],
+            INPUT_RTMP: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_rtmp)],
             INPUT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_title)],
             CONFIRM_START: [CallbackQueryHandler(confirm_start, "^start_stream$")],
         },
