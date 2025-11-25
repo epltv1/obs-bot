@@ -49,7 +49,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS — M3U8 → ANY RTMP
+# STREAM CLASS — M3U8 → ANY RTMP/RTMPS
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -71,9 +71,9 @@ class Stream:
 
     def _build_ffmpeg(self):
         src = self.data["url"]
-        rtmp = self.data["rtmp_url"]  # ANY RTMP
+        rtmp = self.data["rtmp_url"]
 
-        return [
+        base = [
             "ffmpeg", "-y",
             "-analyzeduration", "1000000",
             "-probesize", "1000000",
@@ -86,9 +86,24 @@ class Stream:
             "-bufsize", "2000k",
             "-c:a", "aac",
             "-b:a", "128k",
-            "-f", "flv",
-            rtmp
+            "-f", "flv"
         ]
+
+        # RTMPS (SSL) → Add tls flags
+        if rtmp.startswith("rtmps://"):
+            base.extend([
+                "-rtmp_live", "live",
+                "-rtmp_app", rtmp.split("/", 3)[3].split("?")[0] if "/" in rtmp.split("://", 1)[1] else "",
+                "-rtmp_playpath", "",
+                "-rtmp_swfurl", "",
+                "-rtmp_tcurl", rtmp,
+                rtmp
+            ])
+            return base
+
+        # Standard RTMP
+        base.append(rtmp)
+        return base
 
     async def _monitor(self, app):
         while True:
@@ -114,11 +129,12 @@ class Stream:
             self.thumb_path.unlink(missing_ok=True)
 
     async def stop(self):
-        if self.proc and self.proc.returncode is None:
-            self.proc.send_signal(signal.SIGTERM)
-            await asyncio.sleep(1)
-            if self.proc.returncode is None:
-                self.proc.kill()
+        if self.proc and self.proc.returncode is not None:
+            return
+        self.proc.send_signal(signal.SIGTERM)
+        await asyncio.sleep(1)
+        if self.proc.returncode is None:
+            self.proc.kill()
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
 
@@ -149,12 +165,12 @@ async def load_running_streams(app):
 # COMMANDS
 # ----------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("*M3U8 → RTMP Bot*\nUse /help", parse_mode="Markdown")
+    await update.message.reply_text("*M3U8 → RTMP/RTMPS Bot*\nUse /help", parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Commands*\n"
-        "/stream – start M3U8 → RTMP\n"
+        "/stream – start M3U8 → RTMP/RTMPS\n"
         "/streamlist – view & stop\n"
         "/ping – stats",
         parse_mode="Markdown"
@@ -170,7 +186,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ----------------------------------------------------------------------
-# /stream — M3U8 + ANY RTMP
+# /stream
 # ----------------------------------------------------------------------
 async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -181,13 +197,13 @@ async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
-    await update.message.reply_text("Send RTMP URL (e.g. rtmp://...):")
+    await update.message.reply_text("Send RTMP URL (rtmp:// or rtmps://):")
     return INPUT_RTMP
 
 async def input_rtmp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rtmp = update.message.text.strip()
-    if not rtmp.startswith("rtmp://"):
-        await update.message.reply_text("Invalid RTMP URL. Must start with rtmp://")
+    if not rtmp.startswith(("rtmp://", "rtmps://")):
+        await update.message.reply_text("Invalid! Must start with `rtmp://` or `rtmps://`")
         return INPUT_RTMP
     context.user_data["rtmp_url"] = rtmp
     await update.message.reply_text("Send stream title:")
@@ -199,7 +215,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Start: *{context.user_data['title']}*\n"
         f"M3U8: {context.user_data['url']}\n"
-        f"RTMP: {context.user_data['rtmp_url']}",
+        f"RTMP: `{context.user_data['rtmp_url']}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -220,7 +236,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db[sid] = data
     save_db(db)
 
-    await q.edit_message_text("Stream started!")
+    await q.edit_message_text("Stream started! Supports RTMP & RTMPS.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,13 +270,13 @@ async def streamlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if stream.thumb_path.exists():
             await update.message.reply_photo(
                 photo=open(stream.thumb_path, "rb"),
-                caption=f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}",
+                caption=f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}\nRTMP: `{stream.data['rtmp_url']}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
         else:
             await update.message.reply_text(
-                f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}",
+                f"*M3U8 Stream*\nTitle: {title}\nUptime: {up}\nRTMP: `{stream.data['rtmp_url']}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
             )
