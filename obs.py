@@ -10,7 +10,6 @@ import random
 import string
 from datetime import datetime, timedelta
 from pathlib import Path
-import subprocess
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,7 +26,6 @@ DATA_DIR  = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 STREAM_DB = DATA_DIR / "streams.json"
 LOG_FILE  = DATA_DIR / "bot.log"
-FFMPEG_LOG = DATA_DIR / "ffmpeg.log"
 
 (INPUT_URL, INPUT_FULL_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
 
@@ -64,8 +62,6 @@ class Stream:
     async def start(self, app):
         cmd = self._build_ffmpeg()
         log(f"STARTING: {' '.join(cmd)}")
-
-        # CRITICAL: Redirect stdin to /dev/null
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.DEVNULL,
