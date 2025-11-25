@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
 import os
-import signal here
 import signal
 import json
 import time
@@ -11,6 +10,7 @@ import random
 import string
 from datetime import datetime, timedelta
 from pathlib import Path
+import subprocess
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,6 +27,7 @@ DATA_DIR  = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 STREAM_DB = DATA_DIR / "streams.json"
 LOG_FILE  = DATA_DIR / "bot.log"
+FFMPEG_LOG = DATA_DIR / "ffmpeg.log"
 
 (INPUT_URL, INPUT_FULL_RTMP, INPUT_TITLE, CONFIRM_START) = range(4)
 
@@ -50,7 +51,7 @@ def save_db(db):
         json.dump(db, f, ensure_ascii=False, indent=2)
 
 # ----------------------------------------------------------------------
-# STREAM CLASS — FULL QUALITY
+# STREAM CLASS — FULL QUALITY + NO HANG
 # ----------------------------------------------------------------------
 class Stream:
     def __init__(self, sid, data):
@@ -63,8 +64,11 @@ class Stream:
     async def start(self, app):
         cmd = self._build_ffmpeg()
         log(f"STARTING: {' '.join(cmd)}")
+
+        # CRITICAL: Redirect stdin to /dev/null
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -90,10 +94,7 @@ class Stream:
         ]
 
         if rtmp.startswith("rtmps://"):
-            base.extend([
-                "-rtmp_tcurl", rtmp,
-                rtmp
-            ])
+            base.extend(["-rtmp_tcurl", rtmp, rtmp])
         else:
             base.append(rtmp)
 
@@ -101,7 +102,7 @@ class Stream:
 
     async def _monitor(self, app):
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             if self.proc and self.proc.returncode is not None:
                 break
         await self._on_exit(app)
@@ -124,9 +125,10 @@ class Stream:
 
     async def stop(self):
         if self.proc and self.proc.returncode is None:
-            self.proc.send_signal(signal.SIGTERM)
-            await asyncio.sleep(1)
-            if self.proc.returncode is None:
+            self.proc.terminate()
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
                 self.proc.kill()
         if self.thumb_path.exists():
             self.thumb_path.unlink(missing_ok=True)
@@ -160,15 +162,15 @@ async def load_running_streams(app):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*M3U8 → RTMP/RTMPS Bot*\n"
-        "Send /stream to start",
+        "Send /stream to start streaming",
         parse_mode="Markdown"
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Commands*\n"
-        "/stream – M3U8 → RTMP/RTMPS\n"
-        "/streamlist – view & stop\n"
+        "/stream – Start M3U8 → RTMP\n"
+        "/streamlist – View & stop\n"
         "/ping – VPS stats",
         parse_mode="Markdown"
     )
@@ -198,7 +200,7 @@ async def stream_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def input_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["url"] = update.message.text.strip()
     await update.message.reply_text(
-        "Send **FULL RTMP URL**\n"
+        "Send **FULL RTMP URL** (with key)\n"
         "Examples:\n"
         "`rtmp://vsu.okcdn.ru/input/9985024204507_9267443665627_me6vymuxxy`\n"
         "`rtmps://live-api-s.facebook.com:443/rtmp/FB-KEY`",
@@ -232,7 +234,7 @@ async def input_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("Starting stream in **FULL QUALITY**...")
+    await q.edit_message_text("Starting stream...")
 
     sid = str(uuid.uuid4())
     data = context.user_data.copy()
@@ -244,7 +246,7 @@ async def confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db[sid] = data
     save_db(db)
 
-    await q.edit_message_text("Stream started! **Full original quality**.")
+    await q.edit_message_text("Stream started! Full quality.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,6 +336,7 @@ def main():
     app.add_handler(CommandHandler("streamlist", streamlist))
     app.add_handler(CallbackQueryHandler(stop_callback, "^stop_"))
 
+    log("Bot started. Polling...")
     app.run_polling()
 
 if __name__ == "__main__":
